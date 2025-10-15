@@ -1,11 +1,181 @@
 <script setup>
-import {ref} from "vue";
+import { ref } from "vue";
+import svgpath from 'svgpath';
 
+/**
+ * Calculate bounding box from path segments
+ * @param {Array} segments - Path segments from svgpath
+ * @returns {Object} - {minX, minY, maxX, maxY}
+ */
+function calculateBounds(segments) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  let currentX = 0;
+  let currentY = 0;
+
+  segments.forEach(segment => {
+    const cmd = segment[0];
+
+    // Extract coordinates based on command type
+    switch (cmd) {
+      case 'M':
+      case 'L':
+        currentX = segment[1];
+        currentY = segment[2];
+        minX = Math.min(minX, currentX);
+        minY = Math.min(minY, currentY);
+        maxX = Math.max(maxX, currentX);
+        maxY = Math.max(maxY, currentY);
+        break;
+
+      case 'H':
+        currentX = segment[1];
+        minX = Math.min(minX, currentX);
+        maxX = Math.max(maxX, currentX);
+        break;
+
+      case 'V':
+        currentY = segment[1];
+        minY = Math.min(minY, currentY);
+        maxY = Math.max(maxY, currentY);
+        break;
+
+      case 'C':
+        // Cubic bezier: control point 1, control point 2, end point
+        minX = Math.min(minX, segment[1], segment[3], segment[5]);
+        minY = Math.min(minY, segment[2], segment[4], segment[6]);
+        maxX = Math.max(maxX, segment[1], segment[3], segment[5]);
+        maxY = Math.max(maxY, segment[2], segment[4], segment[6]);
+        currentX = segment[5];
+        currentY = segment[6];
+        break;
+
+      case 'S':
+        // Smooth cubic bezier: control point 2, end point
+        minX = Math.min(minX, segment[1], segment[3]);
+        minY = Math.min(minY, segment[2], segment[4]);
+        maxX = Math.max(maxX, segment[1], segment[3]);
+        maxY = Math.max(maxY, segment[2], segment[4]);
+        currentX = segment[3];
+        currentY = segment[4];
+        break;
+
+      case 'Q':
+        // Quadratic bezier: control point, end point
+        minX = Math.min(minX, segment[1], segment[3]);
+        minY = Math.min(minY, segment[2], segment[4]);
+        maxX = Math.max(maxX, segment[1], segment[3]);
+        maxY = Math.max(maxY, segment[2], segment[4]);
+        currentX = segment[3];
+        currentY = segment[4];
+        break;
+
+      case 'T':
+        // Smooth quadratic bezier: end point only
+        minX = Math.min(minX, segment[1]);
+        minY = Math.min(minY, segment[2]);
+        maxX = Math.max(maxX, segment[1]);
+        maxY = Math.max(maxY, segment[2]);
+        currentX = segment[1];
+        currentY = segment[2];
+        break;
+
+      case 'A':
+        // Arc: we'll use the end point (approximation)
+        currentX = segment[6];
+        currentY = segment[7];
+        minX = Math.min(minX, currentX);
+        minY = Math.min(minY, currentY);
+        maxX = Math.max(maxX, currentX);
+        maxY = Math.max(maxY, currentY);
+        break;
+
+      case 'Z':
+      case 'z':
+        // Close path - no new coordinates
+        break;
+    }
+  });
+
+  return { minX, minY, maxX, maxY };
+}
+
+/**
+ * Normalize SVG path data to 0-1 range for objectBoundingBox
+ * @param {string} pathString - SVG path data (d attribute)
+ * @returns {string} - Normalized path data with coordinates between 0 and 1
+ */
+function normalizePathTo01(pathString) {
+  if (!pathString || pathString.trim() === '') {
+    return pathString;
+  }
+
+  try {
+    const path = svgpath(pathString)
+        .abs()      // Convert all commands to absolute coordinates
+        .unarc()    // Convert arcs to cubic bezier curves
+        .unshort(); // Expand shorthand commands
+
+    // Get path segments
+    const segments = path.segments;
+
+    if (!segments || segments.length === 0) {
+      return pathString;
+    }
+
+    // Calculate bounds
+    const bounds = calculateBounds(segments);
+    const { minX, minY, maxX, maxY } = bounds;
+    const width = maxX - minX;
+    const height = maxY - minY;
+
+    // Handle edge cases
+    if (width === 0 && height === 0) {
+      return 'M0.5,0.5';
+    }
+
+    if (width === 0) {
+      return path
+          .translate(-minX, -minY)
+          .scale(1, 1 / height)
+          .translate(0.5, 0)
+          .round(6)
+          .toString();
+    }
+
+    if (height === 0) {
+      return path
+          .translate(-minX, -minY)
+          .scale(1 / width, 1)
+          .translate(0, 0.5)
+          .round(6)
+          .toString();
+    }
+
+    // Normal case
+    return path
+        .translate(-minX, -minY)
+        .scale(1 / width, 1 / height)
+        .round(6)
+        .toString();
+
+  } catch (error) {
+    console.error('Error normalizing path:', error);
+    return pathString;
+  }
+}
+
+/**
+ * Pretty print SVG output
+ */
 function prettifySVG(svgString) {
   return svgString
       .replace(/(<svg[^>]*>)/, '$1\n  ')
       .replace(/(<clipPath[^>]*>)/, '$1\n    ')
-      .replace(/(<path[^>]*\/>)/, '$1')
+      .replace(/(<path[^>]*\/>)/g, '$1\n    ')
       .replace(/<\/clipPath>/, '\n  </clipPath>')
       .replace(/<\/svg>/, '\n</svg>')
       .replace(/^\s*[\r\n]/gm, '');
@@ -17,16 +187,13 @@ function prettifySVG(svgString) {
  * @returns {string} - SVG with normalized clipPath
  */
 function convertToNormalizedClipPath(svgString) {
-  // remove <?xml ... ?> if present
-  svgString = svgString.replace(/<\?xml.*?\?>\s*/g, '');
+  // Clean up the SVG string
+  svgString = svgString
+      .replace(/<\?xml.*?\?>\s*/g, '')      // Remove XML declaration
+      .replace(/<defs[\s\S]*?<\/defs>\s*/g, '') // Remove defs
+      .replace(/<!--[\s\S]*?-->\s*/g, '');  // Remove comments
 
-  // remove defs section if present
-  svgString = svgString.replace(/<defs[\s\S]*?<\/defs>\s*/g, '');
-
-  // remove comments
-  svgString = svgString.replace(/<!--[\s\S]*?-->\s*/g, '');
-
-  // Parse SVG string using DOMParser (browser native API)
+  // Parse SVG
   const parser = new DOMParser();
   const doc = parser.parseFromString(svgString, 'image/svg+xml');
   const svg = doc.querySelector('svg');
@@ -35,26 +202,32 @@ function convertToNormalizedClipPath(svgString) {
     throw new Error('Invalid SVG content');
   }
 
-  // remove all attributes from svg
+  // Remove all SVG attributes
   Array.from(svg.attributes).forEach(attr => svg.removeAttribute(attr.name));
 
-  // Check if clipPath already exists
+  // Get or create clipPath
   let clipPath = svg.querySelector('clipPath');
 
   if (!clipPath) {
     clipPath = doc.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
     clipPath.setAttribute('clipPathUnits', 'objectBoundingBox');
 
-    const shapes = svg.querySelectorAll('path, circle, rect, ellipse, polygon, polyline');
+    // Get all path elements
+    const paths = svg.querySelectorAll('path');
 
-    shapes.forEach(shape => {
-      const pathData = shapeToPath(shape);
+    if (paths.length === 0) {
+      throw new Error('No path elements found in SVG');
+    }
+
+    // Move paths to clipPath
+    paths.forEach(path => {
+      const pathData = path.getAttribute('d');
       if (pathData) {
         const pathElement = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
         pathElement.setAttribute('d', pathData);
         clipPath.appendChild(pathElement);
-        shape.remove();
       }
+      path.remove();
     });
 
     svg.insertBefore(clipPath, svg.firstChild);
@@ -62,15 +235,22 @@ function convertToNormalizedClipPath(svgString) {
     clipPath.setAttribute('clipPathUnits', 'objectBoundingBox');
   }
 
+  // Normalize all paths in clipPath
   const paths = clipPath.querySelectorAll('path');
   paths.forEach(path => {
     const originalPath = path.getAttribute('d');
-    const normalizedPath = normalizePathCoordinates(originalPath);
+    const normalizedPath = normalizePathTo01(originalPath);
     path.setAttribute('d', normalizedPath);
-    path.removeAttribute('transform');
+
+    // Remove transform and other attributes
+    Array.from(path.attributes).forEach(attr => {
+      if (attr.name !== 'd') {
+        path.removeAttribute(attr.name);
+      }
+    });
   });
 
-  // pretty print the SVG output
+  // Serialize and clean output
   const serializer = new XMLSerializer();
   const output = serializer.serializeToString(svg)
       .replace(/ xmlns="http:\/\/www\.w3\.org\/2000\/svg"/, '');
@@ -78,153 +258,37 @@ function convertToNormalizedClipPath(svgString) {
   return prettifySVG(output);
 }
 
-/**
- * Converts various SVG shapes to path data
- */
-function shapeToPath(element) {
-  const tag = element.tagName.toLowerCase();
-
-  switch(tag) {
-    case 'path':
-      return element.getAttribute('d');
-
-    case 'circle': {
-      const cx = parseFloat(element.getAttribute('cx') || 0);
-      const cy = parseFloat(element.getAttribute('cy') || 0);
-      const r = parseFloat(element.getAttribute('r') || 0);
-      return circleToPath(cx, cy, r);
-    }
-
-    case 'rect': {
-      const x = parseFloat(element.getAttribute('x') || 0);
-      const y = parseFloat(element.getAttribute('y') || 0);
-      const width = parseFloat(element.getAttribute('width') || 0);
-      const height = parseFloat(element.getAttribute('height') || 0);
-      return `M${x},${y} L${x+width},${y} L${x+width},${y+height} L${x},${y+height} Z`;
-    }
-
-    case 'ellipse': {
-      const cx = parseFloat(element.getAttribute('cx') || 0);
-      const cy = parseFloat(element.getAttribute('cy') || 0);
-      const rx = parseFloat(element.getAttribute('rx') || 0);
-      const ry = parseFloat(element.getAttribute('ry') || 0);
-      return ellipseToPath(cx, cy, rx, ry);
-    }
-
-    case 'polygon':
-    case 'polyline': {
-      const points = element.getAttribute('points').trim().split(/[\s,]+/);
-      let path = `M${points[0]},${points[1]}`;
-      for (let i = 2; i < points.length; i += 2) {
-        path += ` L${points[i]},${points[i+1]}`;
-      }
-      if (tag === 'polygon') path += ' Z';
-      return path;
-    }
-
-    default:
-      return null;
-  }
-}
-
-/**
- * Convert circle to path
- */
-function circleToPath(cx, cy, r) {
-  return `M${cx-r},${cy} A${r},${r} 0 1,0 ${cx+r},${cy} A${r},${r} 0 1,0 ${cx-r},${cy} Z`;
-}
-
-/**
- * Convert ellipse to path
- */
-function ellipseToPath(cx, cy, rx, ry) {
-  return `M${cx-rx},${cy} A${rx},${ry} 0 1,0 ${cx+rx},${cy} A${rx},${ry} 0 1,0 ${cx-rx},${cy} Z`;
-}
-
-/**
- * Normalize path coordinates to 0-1 range for objectBoundingBox
- */
-function normalizePathCoordinates(pathString) {
-  // Extract all numeric values from the path
-  const numbers = [];
-  const numberRegex = /-?\d+\.?\d*/g;
-  let match;
-
-  // Store positions of numbers for later replacement
-  const positions = [];
-  while ((match = numberRegex.exec(pathString)) !== null) {
-    numbers.push(parseFloat(match[0]));
-    positions.push({ start: match.index, end: match.index + match[0].length });
-  }
-
-  if (numbers.length === 0) return pathString;
-
-  // Separate x and y coordinates (assuming they alternate)
-  const xCoords = numbers.filter((_, i) => i % 2 === 0);
-  const yCoords = numbers.filter((_, i) => i % 2 === 1);
-
-  // Find bounds
-  const minX = Math.min(...xCoords);
-  const maxX = Math.max(...xCoords);
-  const minY = Math.min(...yCoords);
-  const maxY = Math.max(...yCoords);
-
-  const width = maxX - minX;
-  const height = maxY - minY;
-
-  // Prevent division by zero
-  if (width === 0 || height === 0) return pathString;
-
-  // Normalize coordinates
-  const normalizedNumbers = numbers.map((num, index) => {
-    const isX = index % 2 === 0;
-    if (isX) {
-      return ((num - minX) / width).toFixed(6);
-    } else {
-      return ((num - minY) / height).toFixed(6);
-    }
-  });
-
-  // Rebuild path string with normalized values
-  let result = pathString;
-  let offset = 0;
-
-  positions.forEach((pos, index) => {
-    const oldValue = pathString.substring(pos.start, pos.end);
-    const newValue = normalizedNumbers[index];
-    const before = result.substring(0, pos.start + offset);
-    const after = result.substring(pos.end + offset);
-    result = before + newValue + after;
-    offset += newValue.length - oldValue.length;
-  });
-
-  return result;
-}
-
 const fileInput = ref(null);
-const normalizedSVG = ref('')
+const normalizedSVG = ref('');
 
 function onFileChange(event) {
   const file = event.target.files[0];
-  console.log(file)
-  if (file && file.type === 'image/svg+xml') {
-    fileInput.value = file;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const svgString = e.target.result;
-        normalizedSVG.value = convertToNormalizedClipPath(svgString);
-        
-        console.log('Normalized SVG ClipPath:\n', normalizedSVG.value);
-      } catch (error) {
-        console.error('Error processing SVG:', error);
-      }
-    };
-    reader.readAsText(file);
-  } else {
+
+  if (!file) {
+    return;
+  }
+
+  if (file.type !== 'image/svg+xml') {
     alert('Please select a valid SVG file.');
     normalizedSVG.value = '';
+    return;
   }
+
+  fileInput.value = file;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const svgString = e.target.result;
+      normalizedSVG.value = convertToNormalizedClipPath(svgString);
+      console.log('Normalized SVG ClipPath:\n', normalizedSVG.value);
+    } catch (error) {
+      console.error('Error processing SVG:', error);
+      alert(`Error: ${error.message}`);
+      normalizedSVG.value = '';
+    }
+  };
+  reader.readAsText(file);
 }
 
 function onDownloadFile() {
@@ -245,32 +309,30 @@ function onDownloadFile() {
 <template>
   <div>
     <div style="margin-bottom: 2rem;">
-      <div>
-        SVG File
-       
+      <div style="margin-bottom: 0.5rem;">
+        SVG File (paths only)
       </div>
       <input type="file" @change="onFileChange" accept=".svg" />
     </div>
-    <div v-if="normalizedSVG" style="color:#4aaf50; margin-bottom: 0.5rem; font-weight: bold; font-size: 0.8rem">
+
+    <div
+        v-if="normalizedSVG"
+        style="color: #4aaf50; margin-bottom: 0.5rem; font-weight: bold; font-size: 0.8rem"
+    >
       File ready!
     </div>
+
     <div>
-      <button :disabled="!normalizedSVG" @click="onDownloadFile">Download</button>
+      <button :disabled="!normalizedSVG" @click="onDownloadFile">
+        Download
+      </button>
     </div>
   </div>
 </template>
 
 <style scoped>
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #42b883aa);
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
