@@ -310,7 +310,7 @@ function onDownloadFile() {
   <div>
     <div style="margin-bottom: 2rem;">
       <div style="margin-bottom: 0.5rem;">
-        SVG File (paths only)
+        SVG File (Only paths are supported currently)
       </div>
       <input type="file" @change="onFileChange" accept=".svg" />
     </div>
